@@ -7,6 +7,18 @@ The phone shows a landscape keyboard with a small trackpad. To the TV it looks
 exactly like a normal Bluetooth keyboard + mouse, so **nothing needs to be
 installed on the TV or tablet**.
 
+## Download
+
+GitHub builds the app automatically on every push. On your phone, open
+**https://github.com/ronmurphy/btPhoneboard/releases/latest/download/btPhoneboard.apk**
+(always the newest build), then open the downloaded file to install it. The
+first time, Android asks you to allow installing apps from your browser.
+
+All builds are listed on the
+[Releases page](https://github.com/ronmurphy/btPhoneboard/releases). The build
+itself is defined in `.github/workflows/build.yml`. You can watch it run, or
+start it by hand, from the repo's **Actions** tab.
+
 ## Requirements
 
 - An Android phone running **Android 9 or newer** (it uses the
@@ -17,7 +29,7 @@ installed on the TV or tablet**.
   and mouse pointer. Windows, macOS, Linux, ChromeOS and iPad usually work too.
   Fire TV accepts the keyboard but doesn't show a mouse pointer on its own.
 
-## Build and install
+## Build it yourself (optional)
 
 1. Install [Android Studio](https://developer.android.com/studio).
 2. Get the code: **File → New → Project from Version Control**, paste

@@ -1,0 +1,70 @@
+# Builds the app on GitHub's servers every time code is pushed, runs the unit
+# tests, and publishes the APK as a GitHub Release. You can run it by hand too:
+# Actions tab -> "Build and release APK" -> Run workflow.
+name: Build and release APK
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # lets the workflow create releases and tags
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # 0.1.<build number>, e.g. 0.1.7. Bump "0.1" for bigger releases.
+      VERSION_NAME: 0.1.${{ github.run_number }}
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v5
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # Caches Gradle downloads between runs and checks the wrapper is genuine.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run unit tests
+        run: ./gradlew test
+
+      - name: Build the APK
+        run: >
+          ./gradlew assembleRelease
+          -PappVersionCode=${{ github.run_number }}
+          -PappVersionName=${{ env.VERSION_NAME }}
+
+      - name: Rename the APK
+        run: cp app/build/outputs/apk/release/app-release.apk btPhoneboard.apk
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ env.VERSION_NAME }}
+        run: |
+          {
+            echo "Built from \`${GITHUB_REF_NAME}\` at commit ${GITHUB_SHA::7}: $(git log -1 --format=%s)"
+            echo
+            echo "**To install:** on your phone, tap **btPhoneboard.apk** below and open the download."
+            echo "The first time, Android asks you to allow installing apps from your browser."
+          } > notes.md
+
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            # Re-running a workflow: just replace the APK.
+            gh release upload "$TAG" btPhoneboard.apk --clobber
+          else
+            gh release create "$TAG" btPhoneboard.apk \
+              --target "$GITHUB_SHA" \
+              --title "BT Phoneboard $VERSION_NAME" \
+              --notes-file notes.md \
+              --latest
+          fi
+
+          echo "Released [$TAG](https://github.com/${GITHUB_REPOSITORY}/releases/tag/$TAG)" >> "$GITHUB_STEP_SUMMARY"

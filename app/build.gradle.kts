@@ -16,13 +16,31 @@ android {
         // which is what lets the phone pretend to be a keyboard and mouse.
         minSdk = 28
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        // GitHub Actions passes these in (see .github/workflows/build.yml) so
+        // every build gets a higher number and installs as an update.
+        // Builds on your own computer get the defaults.
+        versionCode = (findProperty("appVersionCode") as String?)?.toInt() ?: 1
+        versionName = (findProperty("appVersionName") as String?) ?: "0.1-dev"
+    }
+
+    signingConfigs {
+        // One shared key, committed to the repo on purpose (see keystore/README.md),
+        // so APKs from GitHub and from Android Studio all install over each other.
+        create("shared") {
+            storeFile = rootProject.file("keystore/shared.keystore")
+            storePassword = "phoneboard"
+            keyAlias = "phoneboard"
+            keyPassword = "phoneboard"
+        }
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("shared")
+        }
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("shared")
         }
     }
 
