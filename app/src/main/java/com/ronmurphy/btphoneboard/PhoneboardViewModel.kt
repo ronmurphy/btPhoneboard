@@ -3,9 +3,10 @@ package com.ronmurphy.btphoneboard
 import android.app.Application
 import android.content.Context
 import androidx.lifecycle.AndroidViewModel
-import com.ronmurphy.btphoneboard.bluetooth.HidController
+import com.ronmurphy.btphoneboard.bluetooth.BluetoothKeyboard
 import com.ronmurphy.btphoneboard.bluetooth.HidStatus
 import com.ronmurphy.btphoneboard.bluetooth.HostDevice
+import com.ronmurphy.btphoneboard.bluetooth.LinkMode
 import com.ronmurphy.btphoneboard.hid.InputModel
 import com.ronmurphy.btphoneboard.hid.ModState
 import com.ronmurphy.btphoneboard.hid.ModifierKey
@@ -20,7 +21,7 @@ import kotlinx.coroutines.flow.asStateFlow
  * A ViewModel outlives the Activity when Android recreates it (for example
  * when you flip the phone to the other landscape direction), so the Bluetooth
  * connection isn't dropped. It is cleared only when the user really leaves the
- * app, and that's when we unregister the keyboard (onCleared).
+ * app, and that's when we shut the keyboard down (onCleared).
  *
  * The UI reads StateFlows (values that can change over time and notify the
  * screen) and calls the plain functions when the user touches something.
@@ -28,10 +29,11 @@ import kotlinx.coroutines.flow.asStateFlow
 class PhoneboardViewModel(application: Application) : AndroidViewModel(application) {
 
     private val prefs = application.getSharedPreferences("phoneboard", Context.MODE_PRIVATE)
-    private val controller = HidController(application, prefs)
-    private val input = InputModel { id, data -> controller.sendReport(id, data) }
+    private val keyboard = BluetoothKeyboard(application, prefs)
+    private val input = InputModel { id, data -> keyboard.sendReport(id, data) }
 
-    val status: StateFlow<HidStatus> = controller.status
+    val status: StateFlow<HidStatus> = keyboard.status
+    val mode: StateFlow<LinkMode> = keyboard.mode
 
     private val _modifiers = MutableStateFlow(input.modifiers)
     val modifiers: StateFlow<Map<ModifierKey, ModState>> = _modifiers.asStateFlow()
@@ -47,11 +49,13 @@ class PhoneboardViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     // Bluetooth
-    fun hasPermission() = controller.hasPermission()
-    fun start() = controller.start()
-    fun bondedDevices(): List<HostDevice> = controller.bondedDevices()
-    fun connect(device: HostDevice) = controller.connect(device.address)
-    fun disconnect() = controller.disconnect()
+    fun hasPermission() = keyboard.hasPermission()
+    fun start() = keyboard.start()
+    fun setMode(mode: LinkMode) = keyboard.setMode(mode)
+    fun phoneName(): String = keyboard.phoneName()
+    fun bondedDevices(): List<HostDevice> = keyboard.bondedDevices()
+    fun connect(device: HostDevice) = keyboard.connect(device.address)
+    fun disconnect() = keyboard.disconnect()
 
     // Keyboard
     fun keyDown(usage: Int) = input.keyDown(usage)
@@ -97,7 +101,7 @@ class PhoneboardViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     override fun onCleared() {
-        controller.stop()
+        keyboard.stop()
     }
 
     companion object {

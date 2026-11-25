@@ -1,6 +1,5 @@
 package com.ronmurphy.btphoneboard.bluetooth
 
-import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
@@ -8,40 +7,16 @@ import android.bluetooth.BluetoothHidDevice
 import android.bluetooth.BluetoothHidDeviceAppSdpSettings
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
-import android.content.BroadcastReceiver
 import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
 import android.content.SharedPreferences
-import android.content.pm.PackageManager
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.ronmurphy.btphoneboard.hid.HidDescriptor
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.Executors
 
-/** What the UI shows in the status bar. */
-sealed interface HidStatus {
-    data object Starting : HidStatus
-    data object NeedsPermission : HidStatus
-    data object BluetoothOff : HidStatus
-    data class Unavailable(val reason: String) : HidStatus
-    /** Registered as a keyboard/mouse, but no TV or tablet is connected. */
-    data object Ready : HidStatus
-    data class Connecting(val deviceName: String) : HidStatus
-    data class Connected(val deviceName: String, val address: String) : HidStatus
-}
-
-/** A paired device the user can pick in the Devices dialog. */
-data class HostDevice(val name: String, val address: String)
-
 /**
- * Wraps Android's BluetoothHidDevice API, which lets the phone act as a
- * Bluetooth keyboard + mouse.
+ * Classic Bluetooth keyboard + mouse, using Android's BluetoothHidDevice API.
  *
  * The steps are:
  *  1. Ask Android for the HID_DEVICE "profile proxy" (getProfileProxy).
@@ -49,17 +24,22 @@ data class HostDevice(val name: String, val address: String)
  *  3. Connect to a paired TV/tablet (connect), or wait for it to connect to us.
  *  4. Send reports (sendReport) for every key press and mouse movement.
  *
+ * If the phone maker has switched this feature off, step 1 never completes
+ * and we call [onUnsupported] so the app can switch to BLE mode instead.
+ *
  * All of Android's Bluetooth callbacks are delivered on the main thread, so
  * the fields below are only touched from one thread.
  *
- * MissingPermission is suppressed because Android Studio can't see that we
- * check BLUETOOTH_CONNECT in start() before calling any of these APIs.
+ * MissingPermission is suppressed because Android Studio can't see that
+ * BluetoothKeyboard checks BLUETOOTH_CONNECT before starting us.
  */
 @SuppressLint("MissingPermission")
-class HidController(
+class ClassicHidLink(
     private val context: Context,
     private val prefs: SharedPreferences,
-) {
+    private val onStatus: (HidStatus) -> Unit,
+    private val onUnsupported: () -> Unit,
+) : HidLink {
     private val adapter: BluetoothAdapter? =
         context.getSystemService(BluetoothManager::class.java)?.adapter
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -67,9 +47,6 @@ class HidController(
     // sendReport() talks to the Bluetooth system service. Doing that on its own
     // thread keeps the UI smooth; a single thread keeps reports in order.
     private val sendExecutor = Executors.newSingleThreadExecutor()
-
-    private val _status = MutableStateFlow<HidStatus>(HidStatus.Starting)
-    val status: StateFlow<HidStatus> = _status.asStateFlow()
 
     private var hidDevice: BluetoothHidDevice? = null
     private var proxyRequested = false
@@ -81,48 +58,24 @@ class HidController(
 
     // ------------------------------------------------------------ public API
 
-    fun hasPermission(): Boolean =
-        Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
-            context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) ==
-            PackageManager.PERMISSION_GRANTED
-
     /** Safe to call many times (the activity calls it on every resume). */
-    fun start() {
-        if (stopped) return
-        val adapter = adapter
-        if (adapter == null) {
-            _status.value = HidStatus.Unavailable("This phone has no Bluetooth.")
+    override fun start() {
+        if (stopped || proxyRequested) return // stopped, already started, or starting
+        val adapter = adapter ?: run {
+            onUnsupported()
             return
         }
-        if (!hasPermission()) {
-            _status.value = HidStatus.NeedsPermission
-            return
-        }
-        if (!adapter.isEnabled) {
-            _status.value = HidStatus.BluetoothOff
-            return
-        }
-        if (proxyRequested) return // already started, or starting
-
-        _status.value = HidStatus.Starting
+        onStatus(HidStatus.Starting)
         proxyRequested = adapter.getProfileProxy(context, profileListener, BluetoothProfile.HID_DEVICE)
         if (proxyRequested) {
-            // Phones without HID device support sometimes never answer at all.
+            // Phones without HID device support usually never answer at all.
             mainHandler.postDelayed(proxyTimeout, PROXY_TIMEOUT_MS)
         } else {
-            _status.value = HidStatus.Unavailable(NOT_SUPPORTED)
+            onUnsupported()
         }
     }
 
-    fun bondedDevices(): List<HostDevice> = try {
-        adapter?.bondedDevices.orEmpty()
-            .map { HostDevice(it.displayName(), it.address) }
-            .sortedBy { it.name.lowercase() }
-    } catch (e: SecurityException) {
-        emptyList()
-    }
-
-    fun connect(address: String) {
+    override fun connect(address: String) {
         val device = try {
             adapter?.getRemoteDevice(address)
         } catch (e: IllegalArgumentException) {
@@ -131,29 +84,23 @@ class HidController(
         connect(device)
     }
 
-    fun disconnect() {
+    override fun disconnect() {
         val current = host ?: return
         hidDevice?.disconnect(current)
         // The user chose to disconnect, so don't auto-reconnect next time.
         prefs.edit().remove(KEY_LAST_HOST).apply()
     }
 
-    fun sendReport(reportId: Int, data: ByteArray) {
+    override fun sendReport(reportId: Int, data: ByteArray) {
         val hid = hidDevice ?: return
         val target = host ?: return
         if (sendExecutor.isShutdown) return
         sendExecutor.execute { hid.sendReport(target, reportId, data) }
     }
 
-    /** Called when the app is closing. */
-    fun stop() {
+    override fun stop() {
         stopped = true
         releaseProfile()
-        try {
-            context.unregisterReceiver(bluetoothStateReceiver)
-        } catch (ignored: IllegalArgumentException) {
-            // wasn't registered
-        }
         sendExecutor.shutdown()
     }
 
@@ -164,8 +111,8 @@ class HidController(
         if (!registered) return
         val current = host
         if (current != null && current.address != device.address) hid.disconnect(current)
-        _status.value = HidStatus.Connecting(device.displayName())
-        if (!hid.connect(device)) _status.value = HidStatus.Ready
+        onStatus(HidStatus.Connecting(device.displayName()))
+        if (!hid.connect(device)) onStatus(HidStatus.Ready)
     }
 
     private fun register(hid: BluetoothHidDevice) {
@@ -180,14 +127,16 @@ class HidController(
         )
         val ok = hid.registerApp(sdp, null, null, context.mainExecutor, hidCallback)
         if (!ok) {
-            _status.value = HidStatus.Unavailable(
-                "Couldn't start. Another keyboard/mouse app may be running; close it and try again.",
+            onStatus(
+                HidStatus.Unavailable(
+                    "Couldn't start. Another keyboard/mouse app may be running; close it, or switch to BLE in Devices.",
+                ),
             )
         }
     }
 
     private fun releaseProfile() {
-        mainHandler.removeCallbacks(proxyTimeout)
+        mainHandler.removeCallbacksAndMessages(null)
         val hid = hidDevice
         if (hid != null) {
             if (registered) hid.unregisterApp()
@@ -204,17 +153,8 @@ class HidController(
         return adapter?.bondedDevices?.firstOrNull { it.address == address }
     }
 
-    private fun BluetoothDevice.displayName(): String =
-        try {
-            name
-        } catch (e: SecurityException) {
-            null
-        } ?: address
-
     private val proxyTimeout = Runnable {
-        if (hidDevice == null && proxyRequested) {
-            _status.value = HidStatus.Unavailable(NOT_SUPPORTED)
-        }
+        if (hidDevice == null && proxyRequested && !stopped) onUnsupported()
     }
 
     // ------------------------------------------------------------- callbacks
@@ -233,29 +173,28 @@ class HidController(
         }
 
         override fun onServiceDisconnected(profile: Int) {
-            if (profile != BluetoothProfile.HID_DEVICE) return
+            if (profile != BluetoothProfile.HID_DEVICE || stopped) return
             releaseProfile()
             if (adapter?.isEnabled == true) {
                 // The Bluetooth service restarted. Try again in a moment.
-                _status.value = HidStatus.Starting
+                onStatus(HidStatus.Starting)
                 mainHandler.postDelayed({ start() }, 1_000)
-            } else {
-                _status.value = HidStatus.BluetoothOff
             }
         }
     }
 
     private val hidCallback = object : BluetoothHidDevice.Callback() {
         override fun onAppStatusChanged(pluggedDevice: BluetoothDevice?, registered: Boolean) {
-            this@HidController.registered = registered
+            this@ClassicHidLink.registered = registered
+            if (stopped) return
             if (!registered) {
                 host = null
-                if (hidDevice != null && !stopped) {
-                    _status.value = HidStatus.Unavailable("Android stopped the keyboard. Reopen the app to restart it.")
+                if (hidDevice != null) {
+                    onStatus(HidStatus.Unavailable("Android stopped the keyboard. Reopen the app to restart it."))
                 }
                 return
             }
-            _status.value = HidStatus.Ready
+            onStatus(HidStatus.Ready)
             // pluggedDevice is a host we were connected to before. If Android
             // doesn't give us one, try the last device we connected to.
             val target = pluggedDevice ?: savedHost()
@@ -264,22 +203,23 @@ class HidController(
 
         override fun onConnectionStateChanged(device: BluetoothDevice?, state: Int) {
             device ?: return
+            if (stopped) return
             Log.d(TAG, "connection state ${device.address} -> $state")
             when (state) {
                 BluetoothProfile.STATE_CONNECTING ->
-                    _status.value = HidStatus.Connecting(device.displayName())
+                    onStatus(HidStatus.Connecting(device.displayName()))
 
                 BluetoothProfile.STATE_CONNECTED -> {
                     host = device
                     prefs.edit().putString(KEY_LAST_HOST, device.address).apply()
-                    _status.value = HidStatus.Connected(device.displayName(), device.address)
+                    onStatus(HidStatus.Connected(device.displayName(), device.address))
                 }
 
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     val current = host
                     if (current == null || current.address == device.address) {
                         host = null
-                        if (this@HidController.registered) _status.value = HidStatus.Ready
+                        if (this@ClassicHidLink.registered) onStatus(HidStatus.Ready)
                     }
                 }
             }
@@ -306,38 +246,21 @@ class HidController(
         }
     }
 
-    private val bluetoothStateReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            when (intent?.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)) {
-                BluetoothAdapter.STATE_ON -> start()
-                BluetoothAdapter.STATE_TURNING_OFF, BluetoothAdapter.STATE_OFF -> {
-                    releaseProfile()
-                    _status.value = HidStatus.BluetoothOff
-                }
-            }
-        }
-    }
-
-    // This init block comes last on purpose: Kotlin runs property initializers
-    // and init blocks top to bottom, so everything above exists by now.
-    init {
-        val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // Android 13+ wants us to say whether other apps may send to this
-            // receiver. This broadcast only ever comes from the system.
-            context.registerReceiver(bluetoothStateReceiver, filter, Context.RECEIVER_EXPORTED)
-        } else {
-            context.registerReceiver(bluetoothStateReceiver, filter)
-        }
-    }
-
     private companion object {
-        const val TAG = "HidController"
+        const val TAG = "ClassicHidLink"
         const val SDP_NAME = "BT Phoneboard"
         const val SDP_DESCRIPTION = "Phone keyboard and trackpad"
         const val SDP_PROVIDER = "BT Phoneboard"
         const val KEY_LAST_HOST = "last_host_address"
         const val PROXY_TIMEOUT_MS = 5_000L
-        const val NOT_SUPPORTED = "This phone doesn't let apps act as a Bluetooth keyboard."
     }
 }
+
+/** The device's Bluetooth name, or its address if the name isn't available. */
+@SuppressLint("MissingPermission")
+internal fun BluetoothDevice.displayName(): String =
+    try {
+        name
+    } catch (e: SecurityException) {
+        null
+    } ?: address

@@ -21,9 +21,14 @@ start it by hand, from the repo's **Actions** tab.
 
 ## Requirements
 
-- An Android phone running **Android 9 or newer** (it uses the
-  `BluetoothHidDevice` API added in Android 9). A few phone makers switch this
-  feature off; the app tells you if yours did.
+- An Android phone running **Android 9 or newer**. The app has two modes:
+  - **Classic** uses Android's built-in `BluetoothHidDevice` feature. Some
+    phone makers (Motorola, for one) switch it off.
+  - **BLE** builds a Bluetooth Low Energy keyboard ("HID over GATT") from
+    general BLE features, so it works on phones where Classic doesn't.
+
+  The app tries Classic first and switches to BLE by itself if Classic isn't
+  available. You can also switch by hand in **Devices**.
 - **Not iPhone**: iOS doesn't let apps act as a Bluetooth keyboard.
 - The TV/tablet: Android TV / Google TV and Android tablets get both keyboard
   and mouse pointer. Windows, macOS, Linux, ChromeOS and iPad usually work too.
@@ -44,7 +49,24 @@ start it by hand, from the repo's **Actions** tab.
 5. Plug the phone in, pick it in the device menu at the top of Android Studio,
    and press **Run ▶**.
 
-## Pairing with a TV
+## Pairing
+
+The tag next to the status dot says which mode the app is in.
+
+### BLE mode
+
+1. Open the app and allow the **Nearby devices** permission. The status says
+   *Waiting: pair "your phone's name"*.
+2. On the tablet: **Settings → Connected devices → Pair new device**.
+   On a TV: **Settings → Remotes & Accessories → Pair accessory**.
+3. Pick your phone's name and accept the pairing request on both screens.
+4. The status turns green with the tablet's name.
+
+After that the tablet reconnects by itself whenever the app is open. If
+pairing fails, "forget" the phone on the tablet and the tablet on the phone,
+then try again.
+
+### Classic mode
 
 1. Open the app and allow the **Nearby devices** permission.
 2. Tap **Devices → Make discoverable** (the phone is visible for 2 minutes).
@@ -83,7 +105,11 @@ Everything is under `app/src/main/java/com/ronmurphy/btphoneboard/`:
 | `hid/HidDescriptor.kt` | The HID report descriptor: the bytes that tell the TV "I'm a keyboard + mouse + media keys" |
 | `hid/HidKeys.kt` | Key codes (HID usage IDs) for keys, modifiers, mouse buttons and media keys |
 | `hid/InputModel.kt` | Turns "key down", "finger moved" etc. into HID reports. Plain Kotlin, no Android, unit tested |
-| `bluetooth/HidController.kt` | Registers with Android's `BluetoothHidDevice` API, connects, and sends the reports |
+| `hid/MouseReports.kt` | Merges queued mouse movements so BLE mode doesn't lag |
+| `bluetooth/HidLink.kt` | The `HidLink` interface both modes implement, plus the status and mode types |
+| `bluetooth/BluetoothKeyboard.kt` | Picks Classic or BLE, falls back to BLE automatically, handles Bluetooth on/off |
+| `bluetooth/ClassicHidLink.kt` | Classic mode: registers with Android's `BluetoothHidDevice` API and sends reports |
+| `bluetooth/BleHidLink.kt` | BLE mode: a GATT server with the HID service, advertising, and notifications |
 | `PhoneboardViewModel.kt` | Connects the UI to the Bluetooth code, and survives screen rotation |
 | `MainActivity.kt` | Permissions, full-screen mode, and opening system screens |
 | `ui/KeyboardLayout.kt` | The keyboard layout as data (rows of keys) |

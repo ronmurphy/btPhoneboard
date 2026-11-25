@@ -4,6 +4,7 @@ import android.os.SystemClock
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -47,6 +49,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ronmurphy.btphoneboard.PhoneboardViewModel
 import com.ronmurphy.btphoneboard.bluetooth.HidStatus
 import com.ronmurphy.btphoneboard.bluetooth.HostDevice
+import com.ronmurphy.btphoneboard.bluetooth.LinkMode
 import com.ronmurphy.btphoneboard.hid.MediaKeys
 import com.ronmurphy.btphoneboard.hid.MouseButton
 
@@ -81,6 +84,7 @@ fun PhoneboardScreen(
     // collectAsStateWithLifecycle turns each StateFlow into Compose state, so
     // the screen redraws whenever the value changes.
     val status by viewModel.status.collectAsStateWithLifecycle()
+    val mode by viewModel.mode.collectAsStateWithLifecycle()
     val modifierStates by viewModel.modifiers.collectAsStateWithLifecycle()
     val fnActive by viewModel.fnActive.collectAsStateWithLifecycle()
     val mouseSpeed by viewModel.mouseSpeed.collectAsStateWithLifecycle()
@@ -109,6 +113,7 @@ fun PhoneboardScreen(
         ) {
             TopBar(
                 status = status,
+                mode = mode,
                 mouseSpeed = mouseSpeed,
                 onRequestPermission = onRequestPermission,
                 onEnableBluetooth = onEnableBluetooth,
@@ -180,7 +185,10 @@ fun PhoneboardScreen(
         // remember {} with no key runs once each time the dialog opens, so the
         // list is fresh if you paired something new in the meantime.
         val devices = remember { viewModel.bondedDevices() }
+        val phoneName = remember { viewModel.phoneName() }
         DevicesDialog(
+            mode = mode,
+            phoneName = phoneName,
             devices = devices,
             connectedAddress = (status as? HidStatus.Connected)?.address,
             onConnect = { device ->
@@ -189,6 +197,10 @@ fun PhoneboardScreen(
             },
             onDisconnect = {
                 viewModel.disconnect()
+                showDevices = false
+            },
+            onSwitchMode = {
+                viewModel.setMode(if (mode == LinkMode.CLASSIC) LinkMode.BLE else LinkMode.CLASSIC)
                 showDevices = false
             },
             onMakeDiscoverable = onMakeDiscoverable,
@@ -201,6 +213,7 @@ fun PhoneboardScreen(
 @Composable
 private fun TopBar(
     status: HidStatus,
+    mode: LinkMode,
     mouseSpeed: Float,
     onRequestPermission: () -> Unit,
     onEnableBluetooth: () -> Unit,
@@ -221,6 +234,15 @@ private fun TopBar(
                 .padding(start = 6.dp)
                 .size(10.dp)
                 .background(statusColor(status), CircleShape),
+        )
+        // A small outlined tag saying which Bluetooth mode is in use.
+        Text(
+            text = mode.label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier
+                .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(4.dp))
+                .padding(horizontal = 6.dp, vertical = 2.dp),
         )
         Text(
             text = statusText(status),
@@ -249,61 +271,97 @@ private fun TopBar(
 
 @Composable
 private fun DevicesDialog(
+    mode: LinkMode,
+    phoneName: String,
     devices: List<HostDevice>,
     connectedAddress: String?,
     onConnect: (HostDevice) -> Unit,
     onDisconnect: () -> Unit,
+    onSwitchMode: () -> Unit,
     onMakeDiscoverable: () -> Unit,
     onOpenBluetoothSettings: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Connect to a TV or tablet") },
+        title = { Text("Connect a tablet or TV (${mode.label} mode)") },
         text = {
             // A scrolling Column, not a LazyColumn: lazy lists inside dialogs
             // can crash because dialogs measure their content in a special way.
             Column(Modifier.verticalScroll(rememberScrollState())) {
-                if (devices.isEmpty()) {
-                    Text("No paired devices yet.")
+                when (mode) {
+                    LinkMode.CLASSIC -> ClassicDevicesContent(devices, connectedAddress, onConnect)
+                    LinkMode.BLE -> BleDevicesContent(phoneName)
                 }
-                for (device in devices) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable { onConnect(device) }
-                            .padding(vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(device.name, Modifier.weight(1f))
-                        if (device.address == connectedAddress) {
-                            Text("Connected", color = MaterialTheme.colorScheme.primary)
-                        }
-                    }
-                    HorizontalDivider()
+
+                Spacer(Modifier.height(8.dp))
+                if (connectedAddress != null) {
+                    TextButton(onClick = onDisconnect) { Text("Disconnect") }
                 }
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    "To pair a new device, tap \"Make discoverable\", then on the TV open " +
-                        "Settings → Remotes & Accessories → Pair accessory and pick this phone. " +
-                        "If the TV doesn't find it, pair from your phone's Bluetooth settings " +
-                        "instead, then come back and pick the TV here.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
+                if (mode == LinkMode.CLASSIC) {
+                    TextButton(onClick = onMakeDiscoverable) { Text("Make this phone discoverable") }
+                }
+                TextButton(onClick = onOpenBluetoothSettings) { Text("Open Bluetooth settings") }
+                TextButton(onClick = onSwitchMode) {
+                    Text(if (mode == LinkMode.CLASSIC) "Switch to BLE mode" else "Switch to Classic mode")
+                }
             }
         },
         confirmButton = {
             TextButton(onClick = onDismiss) { Text("Close") }
         },
-        dismissButton = {
-            Row {
-                if (connectedAddress != null) {
-                    TextButton(onClick = onDisconnect) { Text("Disconnect") }
-                }
-                TextButton(onClick = onOpenBluetoothSettings) { Text("Bluetooth settings") }
-                TextButton(onClick = onMakeDiscoverable) { Text("Make discoverable") }
+    )
+}
+
+@Composable
+private fun ClassicDevicesContent(
+    devices: List<HostDevice>,
+    connectedAddress: String?,
+    onConnect: (HostDevice) -> Unit,
+) {
+    if (devices.isEmpty()) {
+        Text("No paired devices yet.")
+    }
+    for (device in devices) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable { onConnect(device) }
+                .padding(vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(device.name, Modifier.weight(1f))
+            if (device.address == connectedAddress) {
+                Text("Connected", color = MaterialTheme.colorScheme.primary)
             }
-        },
+        }
+        HorizontalDivider()
+    }
+    Spacer(Modifier.height(12.dp))
+    Text(
+        "To pair a new device, tap \"Make this phone discoverable\", then on the TV open " +
+            "Settings → Remotes & Accessories → Pair accessory and pick this phone. " +
+            "If the TV doesn't find it, pair from your phone's Bluetooth settings " +
+            "instead, then come back and pick the TV here.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+}
+
+@Composable
+private fun BleDevicesContent(phoneName: String) {
+    Text("In BLE mode the tablet or TV connects to the phone, so pairing starts over there:")
+    Spacer(Modifier.height(8.dp))
+    Text(
+        "1. On the tablet: Settings → Connected devices → Pair new device.\n" +
+            "    On a TV: Settings → Remotes & Accessories → Pair accessory.\n" +
+            "2. Pick \"$phoneName\" from the list.\n" +
+            "3. Accept the pairing request on both screens.",
+    )
+    Spacer(Modifier.height(8.dp))
+    Text(
+        "After that it reconnects by itself whenever this app is open. If pairing fails, " +
+            "remove (\"forget\") the phone on the tablet and the tablet on the phone, then try again.",
+        style = MaterialTheme.typography.bodySmall,
     )
 }
 
@@ -313,6 +371,7 @@ private fun statusText(status: HidStatus): String = when (status) {
     HidStatus.BluetoothOff -> "Bluetooth is off"
     is HidStatus.Unavailable -> status.reason
     HidStatus.Ready -> "Not connected. Tap Devices"
+    is HidStatus.Advertising -> "Waiting: pair \"${status.name}\" from your tablet or TV"
     is HidStatus.Connecting -> "Connecting to ${status.deviceName}…"
     is HidStatus.Connected -> status.deviceName
 }
@@ -320,7 +379,7 @@ private fun statusText(status: HidStatus): String = when (status) {
 private fun statusColor(status: HidStatus): Color = when (status) {
     is HidStatus.Connected -> Color(0xFF4CAF50)  // green
     is HidStatus.Connecting, HidStatus.Starting -> Color(0xFFFFC107) // amber
-    HidStatus.Ready -> Color(0xFF9E9E9E)         // grey
+    HidStatus.Ready, is HidStatus.Advertising -> Color(0xFF9E9E9E) // grey: waiting
     else -> Color(0xFFF44336)                    // red: something needs fixing
 }
 
