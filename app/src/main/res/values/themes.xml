@@ -1,0 +1,7 @@
+<resources>
+    <!-- The window theme shown before Compose draws anything. Compose itself is
+         themed in ui/theme/Theme.kt. -->
+    <style name="Theme.BtPhoneboard" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
+</resources>

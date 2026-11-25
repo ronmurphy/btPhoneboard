@@ -1,0 +1,18 @@
+# Gradle and Android build output
+.gradle/
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+
+# Machine-specific files Android Studio creates
+local.properties
+.idea/
+*.iml
+.kotlin/
+
+# OS clutter
+.DS_Store
+Thumbs.db
