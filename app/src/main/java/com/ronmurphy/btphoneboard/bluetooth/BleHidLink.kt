@@ -15,14 +15,16 @@ import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
-import android.util.Log
 import com.ronmurphy.btphoneboard.hid.HidDescriptor
 import com.ronmurphy.btphoneboard.hid.mergeMouseReports
 import java.util.Collections
@@ -68,6 +70,12 @@ class BleHidLink(
     private var servicesReady = false
     private var advertising = false
     private var advertiseWithName = true
+    private var receiverRegistered = false
+
+    // Pairing progress, shown in the status bar.
+    private var pairingDevice: BluetoothDevice? = null
+    private var justPairedName: String? = null
+    private var pairingFailedName: String? = null
 
     // ------------------------------------------------------- the GATT database
 
@@ -212,7 +220,9 @@ class BleHidLink(
             return
         }
         server = gattServer
+        EventLog.add("BLE: starting (phone name \"${phoneName()}\")")
         onStatus(HidStatus.Starting)
+        registerBondReceiver()
         pendingServices.clear()
         pendingServices.addAll(buildServices())
         addNextService()
@@ -246,6 +256,10 @@ class BleHidLink(
         stopped = true
         stopAdvertising()
         mainHandler.removeCallbacksAndMessages(null)
+        if (receiverRegistered) {
+            context.unregisterReceiver(bondReceiver)
+            receiverRegistered = false
+        }
         val s = server
         server = null
         if (s != null) {
@@ -264,6 +278,7 @@ class BleHidLink(
         val next = pendingServices.removeFirstOrNull()
         if (next == null) {
             servicesReady = true
+            EventLog.add("BLE: keyboard services ready")
             updateStatus()
             return
         }
@@ -278,13 +293,101 @@ class BleHidLink(
         if (stopped || !servicesReady) return
         val host = currentHost()
         if (host != null) {
+            justPairedName = null
+            pairingFailedName = null
             stopAdvertising()
             onStatus(HidStatus.Connected(host.displayName(), host.address))
+            return
+        }
+        startAdvertising()
+        val pairing = pairingDevice
+        val justPaired = justPairedName
+        val failed = pairingFailedName
+        onStatus(
+            when {
+                pairing != null -> HidStatus.Pairing(pairing.displayName())
+                // Paired, but the tablet hasn't started using the keyboard yet.
+                justPaired != null -> HidStatus.Connecting(justPaired)
+                failed != null -> HidStatus.PairingFailed(failed)
+                else -> HidStatus.Advertising(phoneName())
+            },
+        )
+    }
+
+    // ---------------------------------------------------------------- pairing
+
+    private fun registerBondReceiver() {
+        val filter = IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(bondReceiver, filter, Context.RECEIVER_EXPORTED)
         } else {
-            startAdvertising()
-            onStatus(HidStatus.Advertising(phoneName()))
+            context.registerReceiver(bondReceiver, filter)
+        }
+        receiverRegistered = true
+    }
+
+    /** Android calls pairing "bonding". This hears about every bonding change on the phone. */
+    private val bondReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            intent ?: return
+            val device = deviceFrom(intent) ?: return
+            val state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)
+            val previous = intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, BluetoothDevice.ERROR)
+            onBondStateChanged(device, state, previous)
         }
     }
+
+    private fun onBondStateChanged(device: BluetoothDevice, state: Int, previous: Int) {
+        if (stopped) return
+        EventLog.add("BLE: pairing ${device.displayName()}: ${bondName(previous)} -> ${bondName(state)}")
+        when (state) {
+            BluetoothDevice.BOND_BONDING -> if (currentHost() == null) {
+                pairingDevice = device
+                pairingFailedName = null
+            }
+
+            BluetoothDevice.BOND_BONDED -> if (pairingDevice != null) {
+                pairingDevice = null
+                justPairedName = device.displayName()
+                // If the tablet never starts using us, stop saying "Connecting".
+                mainHandler.postDelayed({
+                    justPairedName = null
+                    updateStatus()
+                }, STATUS_HOLD_MS)
+            }
+
+            BluetoothDevice.BOND_NONE -> {
+                val wasPairing = pairingDevice
+                pairingDevice = null
+                if (wasPairing != null && previous == BluetoothDevice.BOND_BONDING) {
+                    pairingFailedName = wasPairing.displayName()
+                    mainHandler.postDelayed({
+                        pairingFailedName = null
+                        updateStatus()
+                    }, STATUS_HOLD_MS)
+                }
+            }
+        }
+        updateStatus()
+    }
+
+    private fun bondName(state: Int) = when (state) {
+        BluetoothDevice.BOND_NONE -> "not paired"
+        BluetoothDevice.BOND_BONDING -> "pairing"
+        BluetoothDevice.BOND_BONDED -> "paired"
+        else -> "unknown"
+    }
+
+    private fun deviceFrom(intent: Intent): BluetoothDevice? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+        } else {
+            deviceFromBeforeAndroid13(intent)
+        }
+
+    @Suppress("DEPRECATION")
+    private fun deviceFromBeforeAndroid13(intent: Intent): BluetoothDevice? =
+        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
 
     private fun startAdvertising() {
         if (advertising || stopped) return
@@ -396,6 +499,7 @@ class BleHidLink(
 
     private fun setSubscribed(device: BluetoothDevice, characteristic: BluetoothGattCharacteristic?, enabled: Boolean) {
         characteristic ?: return
+        EventLog.add("BLE: ${device.displayName()} turned ${if (enabled) "on" else "off"} ${describe(characteristic)}")
         val set = subscriptions.getOrPut(device.address) { identitySet() }
         if (enabled) set.add(characteristic) else set.remove(characteristic)
         if (enabled && characteristic in inputReports.values) rememberHost(device.address)
@@ -404,7 +508,12 @@ class BleHidLink(
 
     private fun onConnectionChanged(device: BluetoothDevice, newState: Int) {
         if (stopped) return
-        Log.d(TAG, "connection ${device.address} -> $newState")
+        val stateName = when (newState) {
+            BluetoothProfile.STATE_CONNECTED -> "connected"
+            BluetoothProfile.STATE_DISCONNECTED -> "disconnected"
+            else -> "state $newState"
+        }
+        EventLog.add("BLE: ${device.displayName()} (${device.address}) $stateName")
         when (newState) {
             BluetoothProfile.STATE_CONNECTED -> {
                 connectedDevices[device.address] = device
@@ -454,6 +563,15 @@ class BleHidLink(
     private fun identitySet(): MutableSet<BluetoothGattCharacteristic> =
         Collections.newSetFromMap(IdentityHashMap())
 
+    /** A readable name for the log. */
+    private fun describe(characteristic: BluetoothGattCharacteristic): String = when {
+        characteristic === keyboardInput -> "keyboard reports"
+        characteristic === mouseInput -> "mouse reports"
+        characteristic === mediaInput -> "media key reports"
+        characteristic === batteryLevel -> "battery level"
+        else -> "characteristic ${characteristic.uuid}"
+    }
+
     /** Answers a read, starting at [offset] (long values are read in pieces). */
     private fun respond(device: BluetoothDevice, requestId: Int, offset: Int, value: ByteArray) {
         val s = server ?: return
@@ -476,6 +594,7 @@ class BleHidLink(
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     addNextService()
                 } else {
+                    EventLog.add("BLE: adding service ${service?.uuid} failed, error $status")
                     onStatus(HidStatus.Unavailable("Couldn't set up the BLE keyboard (error $status)."))
                 }
             }
@@ -494,6 +613,10 @@ class BleHidLink(
         ) {
             device ?: return
             mainHandler.post {
+                if (characteristic?.uuid == UUID_REPORT_MAP && offset == 0) {
+                    // A good sign: the tablet is setting us up as a keyboard.
+                    EventLog.add("BLE: ${device.displayName()} is reading the keyboard description")
+                }
                 val value = when {
                     characteristic == null -> ByteArray(0)
                     characteristic === batteryLevel -> byteArrayOf(batteryPercent().toByte())
@@ -578,11 +701,12 @@ class BleHidLink(
 
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
-            Log.d(TAG, "advertising started")
+            EventLog.add("BLE: advertising (visible to tablets)")
         }
 
         override fun onStartFailure(errorCode: Int) {
             mainHandler.post {
+                EventLog.add("BLE: advertising failed, error $errorCode")
                 advertising = false
                 when {
                     errorCode == ADVERTISE_FAILED_ALREADY_STARTED -> advertising = true
@@ -598,8 +722,8 @@ class BleHidLink(
     }
 
     private companion object {
-        const val TAG = "BleHidLink"
         const val KEY_KNOWN_HOSTS = "ble_known_hosts"
+        const val STATUS_HOLD_MS = 15_000L
         const val MAX_QUEUE = 200
         const val MAX_ATTEMPTS = 5
         const val RETRY_DELAY_MS = 15L

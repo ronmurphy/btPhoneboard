@@ -11,7 +11,6 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import com.ronmurphy.btphoneboard.hid.HidDescriptor
 import java.util.concurrent.Executors
 
@@ -66,11 +65,13 @@ class ClassicHidLink(
             return
         }
         onStatus(HidStatus.Starting)
+        EventLog.add("Classic: asking Android for the HID device feature")
         proxyRequested = adapter.getProfileProxy(context, profileListener, BluetoothProfile.HID_DEVICE)
         if (proxyRequested) {
             // Phones without HID device support usually never answer at all.
             mainHandler.postDelayed(proxyTimeout, PROXY_TIMEOUT_MS)
         } else {
+            EventLog.add("Classic: Android refused (feature not available)")
             onUnsupported()
         }
     }
@@ -154,7 +155,10 @@ class ClassicHidLink(
     }
 
     private val proxyTimeout = Runnable {
-        if (hidDevice == null && proxyRequested && !stopped) onUnsupported()
+        if (hidDevice == null && proxyRequested && !stopped) {
+            EventLog.add("Classic: no answer in ${PROXY_TIMEOUT_MS / 1000} s (feature switched off on this phone)")
+            onUnsupported()
+        }
     }
 
     // ------------------------------------------------------------- callbacks
@@ -187,6 +191,7 @@ class ClassicHidLink(
         override fun onAppStatusChanged(pluggedDevice: BluetoothDevice?, registered: Boolean) {
             this@ClassicHidLink.registered = registered
             if (stopped) return
+            EventLog.add("Classic: keyboard ${if (registered) "registered" else "unregistered"}")
             if (!registered) {
                 host = null
                 if (hidDevice != null) {
@@ -204,7 +209,7 @@ class ClassicHidLink(
         override fun onConnectionStateChanged(device: BluetoothDevice?, state: Int) {
             device ?: return
             if (stopped) return
-            Log.d(TAG, "connection state ${device.address} -> $state")
+            EventLog.add("Classic: ${device.displayName()} connection state $state")
             when (state) {
                 BluetoothProfile.STATE_CONNECTING ->
                     onStatus(HidStatus.Connecting(device.displayName()))
@@ -247,7 +252,6 @@ class ClassicHidLink(
     }
 
     private companion object {
-        const val TAG = "ClassicHidLink"
         const val SDP_NAME = "BT Phoneboard"
         const val SDP_DESCRIPTION = "Phone keyboard and trackpad"
         const val SDP_PROVIDER = "BT Phoneboard"

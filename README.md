@@ -60,11 +60,18 @@ The tag next to the status dot says which mode the app is in.
 2. On the tablet: **Settings → Connected devices → Pair new device**.
    On a TV: **Settings → Remotes & Accessories → Pair accessory**.
 3. Pick your phone's name and accept the pairing request on both screens.
+   Android often puts the phone's request in a **notification** instead of a
+   pop-up. Because the app is full screen, swipe down from the top twice to
+   see it, then tap Pair/Accept. Be quick, since the request times out.
 4. The status turns green with the tablet's name.
 
 After that the tablet reconnects by itself whenever the app is open. If
 pairing fails, "forget" the phone on the tablet and the tablet on the phone,
 then try again.
+
+If something goes wrong, **Devices → Show Bluetooth log** lists what
+happened (connections, pairing, what the tablet read). A screenshot of it is
+the best bug report.
 
 ### Classic mode
 

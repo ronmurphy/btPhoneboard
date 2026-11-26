@@ -68,6 +68,7 @@ class BluetoothKeyboard(
     /** Switch between Classic and BLE. The choice is remembered for next time. */
     fun setMode(mode: LinkMode) {
         if (mode == _mode.value) return
+        EventLog.add("Switching to ${mode.label} mode")
         _mode.value = mode
         prefs.edit().putString(KEY_MODE, mode.name).apply()
         releaseLink()

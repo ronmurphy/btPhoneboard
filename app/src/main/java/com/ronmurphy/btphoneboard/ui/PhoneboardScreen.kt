@@ -33,6 +33,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -43,10 +44,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ronmurphy.btphoneboard.PhoneboardViewModel
+import com.ronmurphy.btphoneboard.bluetooth.EventLog
 import com.ronmurphy.btphoneboard.bluetooth.HidStatus
 import com.ronmurphy.btphoneboard.bluetooth.HostDevice
 import com.ronmurphy.btphoneboard.bluetooth.LinkMode
@@ -181,6 +184,18 @@ fun PhoneboardScreen(
         }
     }
 
+    // While a tablet is pairing, explain where to accept it on the phone:
+    // Android often puts the request in a notification, which is easy to miss
+    // because this app hides the status bar.
+    val pairing = status as? HidStatus.Pairing
+    var pairingHelpDismissed by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(pairing == null) {
+        if (pairing == null) pairingHelpDismissed = false // ready for the next attempt
+    }
+    if (pairing != null && !pairingHelpDismissed) {
+        PairingHelpDialog(pairing.deviceName, onDismiss = { pairingHelpDismissed = true })
+    }
+
     if (showDevices) {
         // remember {} with no key runs once each time the dialog opens, so the
         // list is fresh if you paired something new in the meantime.
@@ -305,6 +320,8 @@ private fun DevicesDialog(
                 TextButton(onClick = onSwitchMode) {
                     Text(if (mode == LinkMode.CLASSIC) "Switch to BLE mode" else "Switch to Classic mode")
                 }
+
+                BluetoothLog()
             }
         },
         confirmButton = {
@@ -355,7 +372,8 @@ private fun BleDevicesContent(phoneName: String) {
         "1. On the tablet: Settings → Connected devices → Pair new device.\n" +
             "    On a TV: Settings → Remotes & Accessories → Pair accessory.\n" +
             "2. Pick \"$phoneName\" from the list.\n" +
-            "3. Accept the pairing request on both screens.",
+            "3. Accept on both screens. If this phone shows no pop-up, swipe down from the top " +
+            "(twice, since the app is full screen) and accept the Bluetooth pairing notification.",
     )
     Spacer(Modifier.height(8.dp))
     Text(
@@ -365,6 +383,43 @@ private fun BleDevicesContent(phoneName: String) {
     )
 }
 
+@Composable
+private fun PairingHelpDialog(deviceName: String, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Pairing with $deviceName") },
+        text = {
+            Text(
+                "1. On the tablet, check the code and tap Pair.\n\n" +
+                    "2. On this phone, a pairing request should pop up. If it doesn't, swipe down " +
+                    "from the top edge of the screen (twice, because this app is full screen) and " +
+                    "tap Pair or Accept on the Bluetooth pairing notification.\n\n" +
+                    "Be quick: the request times out after about half a minute.",
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("OK") }
+        },
+    )
+}
+
+/** The recent Bluetooth events (see EventLog), hidden until you ask for them. */
+@Composable
+private fun BluetoothLog() {
+    val lines by EventLog.lines.collectAsStateWithLifecycle()
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    TextButton(onClick = { expanded = !expanded }) {
+        Text(if (expanded) "Hide Bluetooth log" else "Show Bluetooth log")
+    }
+    if (expanded) {
+        Text(
+            text = if (lines.isEmpty()) "(nothing yet)" else lines.joinToString("\n"),
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace,
+        )
+    }
+}
+
 private fun statusText(status: HidStatus): String = when (status) {
     HidStatus.Starting -> "Starting…"
     HidStatus.NeedsPermission -> "Needs the Nearby devices permission"
@@ -372,13 +427,15 @@ private fun statusText(status: HidStatus): String = when (status) {
     is HidStatus.Unavailable -> status.reason
     HidStatus.Ready -> "Not connected. Tap Devices"
     is HidStatus.Advertising -> "Waiting: pair \"${status.name}\" from your tablet or TV"
+    is HidStatus.Pairing -> "Pairing with ${status.deviceName}: accept on both screens"
+    is HidStatus.PairingFailed -> "Pairing with ${status.deviceName} didn't finish. Try again"
     is HidStatus.Connecting -> "Connecting to ${status.deviceName}…"
     is HidStatus.Connected -> status.deviceName
 }
 
 private fun statusColor(status: HidStatus): Color = when (status) {
     is HidStatus.Connected -> Color(0xFF4CAF50)  // green
-    is HidStatus.Connecting, HidStatus.Starting -> Color(0xFFFFC107) // amber
+    is HidStatus.Connecting, is HidStatus.Pairing, HidStatus.Starting -> Color(0xFFFFC107) // amber
     HidStatus.Ready, is HidStatus.Advertising -> Color(0xFF9E9E9E) // grey: waiting
     else -> Color(0xFFF44336)                    // red: something needs fixing
 }

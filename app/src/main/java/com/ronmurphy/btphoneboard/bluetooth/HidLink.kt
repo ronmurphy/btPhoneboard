@@ -26,6 +26,12 @@ sealed interface HidStatus {
     /** BLE mode: broadcasting "I'm a keyboard called [name]" and waiting for a tablet. */
     data class Advertising(val name: String) : HidStatus
 
+    /** A tablet started pairing; both screens need to confirm. */
+    data class Pairing(val deviceName: String) : HidStatus
+
+    /** The last pairing attempt didn't finish (cancelled, timed out, or rejected). */
+    data class PairingFailed(val deviceName: String) : HidStatus
+
     data class Connecting(val deviceName: String) : HidStatus
     data class Connected(val deviceName: String, val address: String) : HidStatus
 }
